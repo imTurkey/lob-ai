@@ -1,6 +1,6 @@
 # %%
 # load packages
-import argparse
+import wandb
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -13,157 +13,6 @@ import torch.nn as nn
 import torch.optim as optim
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-def pprint(*args):
-    print(*args)
-    with open(f"{log_name}_log.txt", 'a') as f:
-        print(*args, file=f)
-        f.flush()  # 确保内容立即写入文件
-
-# %%
-arg = argparse.ArgumentParser()
-arg.add_argument('--symbol', type=str, default="FI2010")
-arg.add_argument('--dataset_norm', type=str, default="znorm")
-arg.add_argument('--epochs', type=int, default=200)
-arg.add_argument('--horizon', type=int, default=10)
-arg.add_argument('--time_window', type=int, default=10)
-arg.add_argument('--lob_depth', type=int, default=10)
-args = arg.parse_args()
-
-# sweep: lob_depth, time_window, model_architecture
-
-
-symbol = args.symbol
-dataset_norm = args.dataset_norm
-epochs = args.epochs
-horizon = args.horizon
-time_window = args.time_window
-lob_depth = args.lob_depth
-
-# %%
-# Load Data
-import sys
-sys.path.append("..")
-from utils.tool import load_fi_2010, load_my
-
-if symbol == "FI2010":
-  if dataset_norm == "znorm":
-    dataset_norm = "ZScore"
-  elif dataset_norm == "decpre":
-    dataset_norm = "DecPre"
-  data_train, data_val, data_test = load_fi_2010(dataset_norm)
-else:
-  if dataset_norm == "znorm":
-    dataset_norm = "zscore"
-  elif dataset_norm == "decpre":
-    dataset_norm = "dec"
-  data_train, data_val, data_test = load_my(symbol, dataset_norm)
-
-if symbol == "FI2010":
-  horizons = {
-    1:-5,
-    2:-4,
-    3:-3,
-    5:-2,
-    10:-1
-  }
-else:
-  horizons = {
-    1:-10,
-    2:-9,
-    3:-8,
-    5:-7,
-    10:-6,
-    50:-5,
-    100:-4,
-    200:-3,
-    500:-2,
-    1000:-1
-  }
-
-y_train = data_train[horizons[horizon], :].flatten()
-y_val = data_val[horizons[horizon], :].flatten()
-y_test = data_test[horizons[horizon], :].flatten()
-
-y_train = y_train[time_window-1:] - 1
-y_val = y_val[time_window-1:] - 1
-y_test = y_test[time_window-1:] - 1 
-
-data_train = data_train[:4*lob_depth, :].T
-data_val = data_val[:4*lob_depth, :].T
-data_test = data_test[:4*lob_depth, :].T
-
-print(data_train.shape)
-
-
-# %%
-#Computing weights for the weighted cross entropy loss
-def compute_weights(y):
-  cont_0 = 0
-  cont_1 = 0
-  cont_2 = 0
-  for i in range(y.shape[0]):
-    if (y[i] == 0):
-      cont_0 += 1
-    elif (y[i] == 1):
-      cont_1 += 1
-    elif (y[i] == 2):
-      cont_2 += 2
-    else: 
-      raise Exception("wrong labels")
-  print(f"0:{cont_0}, 1:{cont_1}, 2:{cont_2}")
-  return torch.Tensor([1e6/cont_0, 1e6/cont_1, 1e6/cont_2]).to(device)
-
-y_total = np.concatenate((y_train, y_val, y_test))
-weights = compute_weights(y_total)
-
-# %%
-class Dataset(data.Dataset):
-    """Characterizes a dataset for PyTorch"""
-    def __init__(self, x, y, num_classes, time_window):
-        """Initialization""" 
-        self.num_classes = num_classes
-        self.time_window = time_window
-        self.x = x   
-        self.y = y
-
-        self.length = x.shape[0] -self.time_window + 1
-        print(self.length)
-
-        x = torch.from_numpy(x)
-        self.x = torch.unsqueeze(x, 1)
-        self.y = torch.from_numpy(y)
-
-    def __len__(self):
-        """Denotes the total number of samples"""
-        return int(self.length)
-
-    def __getitem__(self, i):
-        input = self.x[i:i+self.time_window, :]
-        input = input.permute(1, 2, 0)
-        input = torch.squeeze(input)
-
-        return input, self.y[i]
-
-# %%
-#Hyperparameters
-
-batch_size = 256
-# T = 50   #horizon    
-lr = 0.001
-num_classes = 3
-
-dataset_val = Dataset(data_val, y_val, num_classes, time_window)
-dataset_test = Dataset(data_test, y_test, num_classes, time_window)
-dataset_train = Dataset(data_train, y_train, num_classes, time_window)
-
-train_loader = torch.utils.data.DataLoader(dataset=dataset_train, batch_size=batch_size, shuffle=True)
-val_loader = torch.utils.data.DataLoader(dataset=dataset_val, batch_size=batch_size, shuffle=False)
-test_loader = torch.utils.data.DataLoader(dataset=dataset_test, batch_size=batch_size, shuffle=False)
-
-# %% [markdown]
-# ### **Model Architecture**
-# The architecture is explained in the original paper
 
 # %%
 class TABL_layer(nn.Module):
@@ -287,12 +136,12 @@ class BiN(nn.Module):
 
         # if the two scalars are negative then we setting them to 0
         if (self.y1[0] < 0):
-            y1 = torch.FloatTensor(1, device=x.device)
+            y1 = torch.FloatTensor(1).to(x.device)
             self.y1 = nn.Parameter(y1)
             nn.init.constant_(self.y1, 0.01)
 
         if (self.y2[0] < 0):
-            y2 = torch.FloatTensor(1, device=x.device)
+            y2 = torch.FloatTensor(1).to(x.device)
             self.y2 = nn.Parameter(y2)
             nn.init.constant_(self.y2, 0.01)
 
@@ -412,44 +261,55 @@ class BiN_CTABL(nn.Module):
       if (torch.linalg.matrix_norm(w) > 10.0):
         norm = torch.linalg.matrix_norm(w)
         desired = torch.clamp(norm, min=0.0, max=10.0)
-        w *= (desired / (1e-8 + norm))   
-    
-
-# %% [markdown]
-# ### **Model Training**
+        w *= (desired / (1e-8 + norm)) 
 
 # %%
-#you can choose between the two architectures
+class Dataset(data.Dataset):
+    """Characterizes a dataset for PyTorch"""
+    def __init__(self, x, y, num_classes, time_window):
+        """Initialization""" 
+        self.num_classes = num_classes
+        self.time_window = time_window
+        self.x = x   
+        self.y = y
 
-# model = BiN_BTABL(4*lob_depth, time_window, 120, 5, num_classes, 1)
-model = BiN_CTABL(4*lob_depth, time_window, 60, 10, 120, 5, num_classes, 1)
+        self.length = x.shape[0] -self.time_window + 1
 
-# %%
-summary(model, (1, 4*lob_depth, time_window))
+        x = torch.from_numpy(x)
+        self.x = torch.unsqueeze(x, 1)
+        self.y = torch.from_numpy(y)
 
-model.to(device)
+    def __len__(self):
+        """Denotes the total number of samples"""
+        return int(self.length)
 
-criterion = nn.CrossEntropyLoss(weight=weights)
-optimizer = torch.optim.Adam(model.parameters(), lr, weight_decay=1e-3)
+    def __getitem__(self, i):
+        input = self.x[i:i+self.time_window, :]
+        input = input.permute(1, 2, 0)
+        input = torch.squeeze(input)
 
-
-def batch_gd(model, criterion, optimizer, epochs):
+        return input, self.y[i]
+  
+def batch_gd(model, train_loader, val_loader, criterion, optimizer, epochs, model_save_name="best", waiting_pacience=10):
     
     train_losses = np.zeros(epochs)
     test_losses = np.zeros(epochs)
     best_test_loss = np.inf
     best_test_epoch = 0
+    test_loss_goup_cnt = 0
     
+    
+       
     for it in range(epochs):
-        
-        #as written in the paper we change the lr at the 11 and 71 epochs
-        if (it == 10):
-              for g in optimizer.param_groups:
-                g['lr'] = 0.0001
+        if optimizer.param_groups[0]["lr"] < 1e-5:
+          print("Early stopping at", it)
+          break
 
-        if (it == 70):
-          for g in optimizer.param_groups:
-                g['lr'] = 0.00001
+        if test_loss_goup_cnt > waiting_pacience:
+            for g in optimizer.param_groups:
+                g['lr'] *= 0.1
+            test_loss_goup_cnt = 0
+            print("LR decayed at Epoch.", it, "to", g['lr'])
 
         model.train()
         t0 = datetime.now()
@@ -491,82 +351,263 @@ def batch_gd(model, criterion, optimizer, epochs):
         
         #We save the best model
         if test_loss < best_test_loss:
-            torch.save(model, './best_model_BiNCTABL.pt')
+            torch.save(model, f'./{model_save_name}.pt')
             best_test_loss = test_loss
+            test_loss_goup_cnt = 0
             best_test_epoch = it
             print('model saved')
+        else:
+           test_loss_goup_cnt += 1
 
         dt = datetime.now() - t0
-        pprint(f'Epoch {it+1}/{epochs}, Train Loss: {train_loss:.4f}, \
+        print(f'Epoch {it+1}/{epochs}, Train Loss: {train_loss:.4f}, \
           Validation Loss: {test_loss:.4f}, Duration: {dt}, Best Val Epoch: {best_test_epoch}')
         
     #torch.save(model, '/content/drive/MyDrive/Output/best_model_translob_FI')
     return train_losses, test_losses
 
-# %%
-current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_name = f'{symbol}_{dataset_norm}_horizon{horizon}_{current_time}'
-pprint("------- List Hyper Parameters -------")
-pprint("epochs   ->   " + str(epochs))
-pprint("learningRate   ->   " + str(lr))
-pprint("horizon    ->     " + str(horizon))
-pprint("batch size   ->    " + str(batch_size))
-pprint("Optimizer   ->    " + str(optimizer))
-pprint("symbol    ->    ", str(symbol))
-pprint("dataset norm    ->   " + str(dataset_norm))
+def objective(config):
+  time_now = datetime.now().strftime("%Y%m%d%H%M%S")
+  print(f"Sweep at {time_now}, Params:", config)
 
-train_losses, val_losses = batch_gd(model, criterion, optimizer, 
-                                     epochs)
+  # config: dataset_norm, horizon, label_percentage, time_window, lob_depth, d2, t2, d3, t3
+  symbol = config.symbol
+  epochs = config.epochs
+  dataset_norm = config.dataset_norm
+  horizon = config.horizon
+  label_percentage = config.label_percentage
+  time_window = config.time_window
+  lob_depth = config.lob_depth
+  d2 = lob_depth*8
+  d3 = lob_depth*8
+  t2 = config.time_window // 2
+  t3 = config.time_window // 4
+  # d2 = config.d2
+  # t2 = config.t2
+  # d3 = config.d3
+  # t3 = config.t3
 
-plt.figure(figsize=(15,6))
-plt.plot(train_losses, label='train loss')
-plt.plot(val_losses, label='validation loss')
-plt.legend()
-plt.savefig(f'{log_name}_loss.jpg')
+  # %%
+  # Load Data
+  import sys
+  sys.path.append("..")
+  from utils.tool import load_fi_2010, load_my
 
-# %% [markdown]
-# ### **Model Testing**
+  if symbol == "FI2010":
+    if dataset_norm == "znorm":
+      dataset_norm = "ZScore"
+    elif dataset_norm == "decpre":
+      dataset_norm = "DecPre"
+    data_train, data_val, data_test = load_fi_2010(dataset_norm)
+  else:
+    if dataset_norm == "znorm":
+      dataset_norm = "zscore"
+    elif dataset_norm == "decpre":
+      dataset_norm = "dec"
+    data_train, data_val, data_test = load_my(symbol, dataset_norm, dataset_path="../data_my3")
 
-# %%
-model = torch.load('./best_model_BiNCTABL.pt')
+  if symbol == "FI2010":
+    horizons = {
+      1:-5,
+      2:-4,
+      3:-3,
+      5:-2,
+      10:-1
+    }
+  else:
+    horizons = {
+      1:-10,
+      2:-9,
+      3:-8,
+      5:-7,
+      10:-6,
+      50:-5,
+      100:-4,
+      200:-3,
+      500:-2,
+      1000:-1
+    }
 
-n_correct = 0.
-n_total = 0.
-all_targets = []
-all_predictions = []
+  y_pct_train = data_train[horizons[horizon], :].flatten()
+  y_pct_val = data_val[horizons[horizon], :].flatten()
+  y_pct_test = data_test[horizons[horizon], :].flatten()
 
-for inputs, targets in test_loader:
-    # Move to GPU
-    inputs, targets = inputs.to(device, dtype=torch.float), targets.to(device, dtype=torch.int64)
+  thres = np.percentile(np.abs(y_pct_train), label_percentage)
 
-    # Forward pass
-    outputs = model(inputs)
-    #outputs = torch.squeeze(outputs)
-    # Get prediction
-    # torch.max returns both max and argmax
-    _, predictions = torch.max(outputs, 1)
+  y_train = np.zeros_like(y_pct_train)
+  y_train[y_pct_train > thres] = 1
+  y_train[y_pct_train < -thres] = -1
 
-    # update counts
-    n_correct += (predictions == targets).sum().item()
-    n_total += targets.shape[0]
+  y_val = np.zeros_like(y_pct_val)
+  y_val[y_pct_val > thres] = 1
+  y_val[y_pct_val < -thres] = -1
 
-    all_targets.append(targets.cpu().numpy())
-    all_predictions.append(predictions.cpu().numpy())
+  # y_test = np.zeros_like(y_pct_test)
+  # y_test[y_pct_test > thres] = 1
+  # y_test[y_pct_test < -thres] = -1
+  y_test = y_pct_test
 
-test_acc = n_correct / n_total
-pprint(f"Test acc: {test_acc:.4f}")
-  
-all_targets = np.concatenate(all_targets)    
-all_predictions = np.concatenate(all_predictions)    
+  y_train = y_train[time_window-1:] + 1
+  y_val = y_val[time_window-1:] + 1
+  # y_test = y_test[time_window-1:] + 1 
 
-# %%
-pprint('accuracy_score:', accuracy_score(all_targets, all_predictions))
-pprint(classification_report(all_targets, all_predictions, digits=4))
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, ConfusionMatrixDisplay
+  data_train = data_train[:4*lob_depth, :].T
+  data_val = data_val[:4*lob_depth, :].T
+  data_test = data_test[:4*lob_depth, :].T
 
-c = confusion_matrix(all_targets, all_predictions, normalize="true")
-disp = ConfusionMatrixDisplay(c)
-disp.plot()
-plt.savefig(f'{log_name}_cm.jpg')
+  print("train:", data_train.shape)
+  print("val: ", data_val.shape)
+  print("test: ", data_test.shape)
 
 
+  # %%
+  #Computing weights for the weighted cross entropy loss
+  def compute_weights(y):
+    cont_0 = 0
+    cont_1 = 0
+    cont_2 = 0
+    for i in range(y.shape[0]):
+      if (y[i] == 0):
+        cont_0 += 1
+      elif (y[i] == 1):
+        cont_1 += 1
+      elif (y[i] == 2):
+        cont_2 += 2
+      else: 
+        raise Exception("wrong labels")
+    print(f"0:{cont_0}, 1:{cont_1}, 2:{cont_2}")
+    return torch.Tensor([1e6/cont_0, 1e6/cont_1, 1e6/cont_2]).to(device)
+
+  # y_total = np.concatenate((y_train, y_val, y_test))
+  weights = compute_weights(y_train)
+
+  # %%
+  #Hyperparameters
+  batch_size = 256 
+  lr = 0.001
+  num_classes = 3
+
+  dataset_train = Dataset(data_train, y_train, num_classes, time_window)
+  dataset_val = Dataset(data_val, y_val, num_classes, time_window)
+  dataset_test = Dataset(data_test, y_test, num_classes, time_window)
+
+  train_loader = torch.utils.data.DataLoader(dataset=dataset_train, batch_size=batch_size, shuffle=True)
+  val_loader = torch.utils.data.DataLoader(dataset=dataset_val, batch_size=batch_size, shuffle=False)
+  test_loader = torch.utils.data.DataLoader(dataset=dataset_test, batch_size=batch_size, shuffle=False)
+
+  # %%
+  #you can choose between the two architectures
+
+  # model = BiN_BTABL(4*lob_depth, time_window, 120, 5, num_classes, 1)
+  model = BiN_CTABL(4*lob_depth, time_window, d2, t2, d3, t3, num_classes, 1)
+
+  # %%
+  # summary(model, (1, 4*lob_depth, time_window))
+
+  model.to(device)
+
+  criterion = nn.CrossEntropyLoss(weight=weights)
+  optimizer = torch.optim.Adam(model.parameters(), lr, weight_decay=1e-3)
+
+  train_losses, val_losses = batch_gd(model, train_loader, val_loader, criterion, optimizer, 
+                                      epochs, model_save_name=time_now)
+
+  model = torch.load(f'./{time_now}.pt')
+  model.eval()
+
+  n_correct = 0.
+  n_total = 0.
+  all_targets = []
+  all_predictions = []
+  total_pnl = 0
+  total_win_times = 0
+  total_trade_times = 0
+  pnl_ratios = []
+
+  for inputs, targets in tqdm(test_loader):
+      # Move to GPU
+      inputs, targets = inputs.to(device, dtype=torch.float), targets.to(device, dtype=torch.float)
+
+      # Forward pass
+      with torch.no_grad():
+        outputs = model(inputs)
+      #outputs = torch.squeeze(outputs)
+      # Get prediction
+      # torch.max returns both max and argmax
+      _, predictions = torch.max(outputs, 1)
+
+      targets = targets.detach().cpu().numpy()
+      predictions = predictions.detach().cpu().numpy()
+
+      # update counts
+      targets_labels = np.zeros_like(targets) + 1
+      targets_labels[targets>thres] = 0
+      targets_labels[targets<-thres] = 2
+      n_correct += (predictions == targets_labels).sum().item()
+      n_total += targets.shape[0]
+      all_targets.append(targets_labels)
+      all_predictions.append(predictions)
+
+      # backtest
+      long_pnl = targets[predictions == 0]
+      short_pnl = -targets[predictions == 2]
+
+      win_times = (long_pnl>0).sum() + (short_pnl>0).sum()
+      trade_times = (predictions == 0).sum() + (predictions == 2).sum()
+
+      long_pnl_sum = long_pnl.sum()
+      short_pnl_sum = short_pnl.sum()
+      transaction_fees = 0 # 1e-4 * trade_times
+
+      total_pnl += (long_pnl_sum + short_pnl_sum - transaction_fees)
+      total_win_times += win_times
+      total_trade_times += trade_times
+      pnl_ratios.append((long_pnl_sum+short_pnl_sum)/(trade_times+1e-7))
+
+  test_acc = n_correct / n_total
+  print(f"Test acc: {test_acc:.4f}")
+  print(f"Total PNL: {total_pnl:.4f}")
+  win_rates = total_win_times/total_trade_times
+  pnl_ratio_per_trade = np.mean(pnl_ratios)
+  print(f"Win Rates: {100*win_rates:.2f}%, Trade Times: {total_trade_times}")
+  print(f"PNL Ratio Per Trade: {pnl_ratio_per_trade:.8f}")
+
+  all_targets = np.concatenate(all_targets)    
+  all_predictions = np.concatenate(all_predictions)  
+  print(classification_report(all_targets, all_predictions, digits=4))
+
+  return {
+     "test_acc":test_acc,
+     "total_pnl":total_pnl,
+     "total_trade_times":total_trade_times,
+     "win_rates":win_rates, 
+     "pnl_ratio_per_trade":pnl_ratio_per_trade
+     }
+
+def main():
+  wandb.init(project="lobai-bintabl-sweep")
+  res  = objective(wandb.config)
+  wandb.log(res)
+
+if __name__ == "__main__":
+  sweep_configuration = {
+      "method": "random",
+      "metric": {"goal": "maximize", "name": "total_pnl"},
+      "parameters": {
+         "symbol": {"values": ["futures_ethusdt"]},
+         "epochs": {"value": 100},
+         "dataset_norm": {"values": ["znorm"]},
+         "horizon": {"values": [1, 5, 10, 50, 100]},
+         "label_percentage": {"distribution": "q_uniform", "q":5, "max": 99, "min": 50},
+         "time_window": {"distribution": "q_uniform", "q":10, "max": 100, "min": 10},
+         "lob_depth": {"distribution": "q_uniform", "q":5, "max": 100, "min": 10},
+        #  "d2": {'distribution': 'q_log_uniform_values', 'q': 8, "max": 128, "min": 16},
+        #  "t2": {'distribution': 'q_log_uniform_values', 'q': 8, "max": 128, "min": 16},
+        #  "d3": {'distribution': 'q_log_uniform_values', 'q': 8, "max": 128, "min": 16},
+        #  "t3": {'distribution': 'q_log_uniform_values', 'q': 8, "max": 128, "min": 16},
+      }
+  }
+
+  sweep_id = wandb.sweep(sweep=sweep_configuration, project="lobai-bintabl-sweep")
+
+  wandb.agent(sweep_id, function=main, count=100)
